@@ -24,6 +24,7 @@
 #include <folly/Optional.h>
 #include <folly/Range.h>
 #include <folly/Utility.h>
+#include <folly/lang/Exception.h>
 
 namespace folly {
 
@@ -229,6 +230,12 @@ class Executor {
     return getKeepAliveToken(&executor);
   }
 
+  template <typename F>
+  FOLLY_ERASE static void invokeCatchingExns(char const* p, F f) noexcept {
+    auto h = [p](auto&... e) noexcept { invokeCatchingExnsLog(p, &e...); };
+    catch_exception([&] { catch_exception<std::exception const&>(f, h); }, h);
+  }
+
  protected:
   /**
    * Returns true if the KeepAlive is constructed from an executor that does
@@ -262,6 +269,9 @@ class Executor {
   }
 
  private:
+  static void invokeCatchingExnsLog(
+      char const* prefix, std::exception const* ex = nullptr);
+
   template <typename ExecutorT>
   static KeepAlive<ExecutorT> makeKeepAliveDummy(ExecutorT* executor) {
     static_assert(
@@ -297,6 +307,8 @@ Executor::KeepAlive<ExecutorT> getKeepAliveToken(
 }
 
 struct ExecutorBlockingContext {
+  bool forbid;
+  bool allowTerminationOnBlocking;
   StringPiece name;
 };
 static_assert(
@@ -304,7 +316,6 @@ static_assert(
     "non-standard layout");
 
 struct ExecutorBlockingList {
-  bool forbid;
   ExecutorBlockingList* prev;
   ExecutorBlockingContext curr;
 };
@@ -315,13 +326,15 @@ static_assert(
 class ExecutorBlockingGuard {
  public:
   struct PermitTag {};
-  struct ForbidTag {};
+  struct TrackTag {};
+  struct ProhibitTag {};
 
   ~ExecutorBlockingGuard();
   ExecutorBlockingGuard() = delete;
 
   explicit ExecutorBlockingGuard(PermitTag) noexcept;
-  explicit ExecutorBlockingGuard(ForbidTag, StringPiece name) noexcept;
+  explicit ExecutorBlockingGuard(TrackTag, StringPiece name) noexcept;
+  explicit ExecutorBlockingGuard(ProhibitTag, StringPiece name) noexcept;
 
   ExecutorBlockingGuard(ExecutorBlockingGuard&&) = delete;
   ExecutorBlockingGuard(ExecutorBlockingGuard const&) = delete;

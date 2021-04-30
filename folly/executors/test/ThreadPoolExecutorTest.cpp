@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+#include <folly/DefaultKeepAliveExecutor.h>
+#include <folly/executors/CPUThreadPoolExecutor.h>
 #include <folly/executors/ThreadPoolExecutor.h>
 
 #include <atomic>
@@ -590,19 +592,27 @@ class TestData : public folly::RequestData {
 };
 
 TEST(ThreadPoolExecutorTest, RequestContext) {
-  CPUThreadPoolExecutor executor(1);
-
   RequestContextScopeGuard rctx; // create new request context for this scope
   EXPECT_EQ(nullptr, RequestContext::get()->getContextData("test"));
   RequestContext::get()->setContextData("test", std::make_unique<TestData>(42));
   auto data = RequestContext::get()->getContextData("test");
   EXPECT_EQ(42, dynamic_cast<TestData*>(data)->data_);
 
-  executor.add([] {
-    auto data2 = RequestContext::get()->getContextData("test");
-    ASSERT_TRUE(data2 != nullptr);
-    EXPECT_EQ(42, dynamic_cast<TestData*>(data2)->data_);
-  });
+  struct VerifyRequestContext {
+    ~VerifyRequestContext() {
+      auto data2 = RequestContext::get()->getContextData("test");
+      EXPECT_TRUE(data2 != nullptr);
+      if (data2 != nullptr) {
+        EXPECT_EQ(42, dynamic_cast<TestData*>(data2)->data_);
+      }
+    }
+  };
+
+  {
+    CPUThreadPoolExecutor executor(1);
+    executor.add([] { VerifyRequestContext(); });
+    executor.add([x = VerifyRequestContext()] {});
+  }
 }
 
 std::atomic<int> g_sequence{};
@@ -926,7 +936,7 @@ static void WeakRefTest() {
             .via(&fe)
             .thenValue([](auto&&) { burnMs(100)(); })
             .thenValue([&](auto&&) { ++counter; })
-            .via(fe.weakRef())
+            .via(getWeakRef(fe))
             .thenValue([](auto&&) { burnMs(100)(); })
             .thenValue([&](auto&&) { ++counter; });
   }
@@ -976,6 +986,13 @@ static void virtualExecutorTest() {
   EXPECT_EQ(2, counter);
 }
 
+class SingleThreadedCPUThreadPoolExecutor : public CPUThreadPoolExecutor,
+                                            public SequencedExecutor {
+ public:
+  explicit SingleThreadedCPUThreadPoolExecutor(size_t)
+      : CPUThreadPoolExecutor(1) {}
+};
+
 TEST(ThreadPoolExecutorTest, WeakRefTestIO) {
   WeakRefTest<IOThreadPoolExecutor>();
 }
@@ -986,6 +1003,18 @@ TEST(ThreadPoolExecutorTest, WeakRefTestCPU) {
 
 TEST(ThreadPoolExecutorTest, WeakRefTestEDF) {
   WeakRefTest<EDFThreadPoolExecutor>();
+}
+
+TEST(ThreadPoolExecutorTest, WeakRefTestSingleThreadedCPU) {
+  WeakRefTest<SingleThreadedCPUThreadPoolExecutor>();
+}
+
+TEST(ThreadPoolExecutorTest, WeakRefTestSequential) {
+  SingleThreadedCPUThreadPoolExecutor ex(1);
+  auto weakRef = getWeakRef(ex);
+  EXPECT_TRUE((std::is_same_v<
+               decltype(weakRef),
+               Executor::KeepAlive<SequencedExecutor>>));
 }
 
 TEST(ThreadPoolExecutorTest, VirtualExecutorTestIO) {

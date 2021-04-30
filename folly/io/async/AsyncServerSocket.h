@@ -23,7 +23,9 @@
 #include <exception>
 #include <memory>
 #include <vector>
+#include <boost/variant.hpp>
 
+#include <folly/ExceptionWrapper.h>
 #include <folly/SocketAddress.h>
 #include <folly/String.h>
 #include <folly/experimental/observer/Observer.h>
@@ -169,7 +171,19 @@ class AsyncServerSocket : public DelayedDestruction, public AsyncSocketBase {
      *
      * @param ex  An exception representing the error.
      */
-    virtual void acceptError(const std::exception& ex) noexcept = 0;
+
+    // TODO(T81599451): Remove the acceptError(const std::exception&)
+    // after migration and remove compile warning supression.
+    FOLLY_PUSH_WARNING
+    FOLLY_GNU_DISABLE_WARNING("-Woverloaded-virtual")
+    virtual void acceptError(exception_wrapper ew) noexcept {
+      auto ex = ew.get_exception<std::exception>();
+      FOLLY_SAFE_CHECK(ex, "no exception");
+      acceptError(*ex);
+    }
+
+    virtual void acceptError(const std::exception& /* unused */) noexcept {}
+    FOLLY_POP_WARNING
 
     /**
      * acceptStarted() will be called in the callback's EventBase thread
@@ -325,6 +339,8 @@ class AsyncServerSocket : public DelayedDestruction, public AsyncSocketBase {
    */
   bool setZeroCopy(bool enable);
 
+  using IPAddressIfNamePair = std::pair<IPAddress, std::string>;
+
   /**
    * Bind to the specified address.
    *
@@ -335,6 +351,15 @@ class AsyncServerSocket : public DelayedDestruction, public AsyncSocketBase {
   virtual void bind(const SocketAddress& address);
 
   /**
+   * Bind to the specified address/if name
+   *
+   * This must be called from the primary EventBase thread.
+   *
+   * Throws AsyncSocketException on error.
+   */
+  virtual void bind(const SocketAddress& address, const std::string& ifName);
+
+  /**
    * Bind to the specified port for the specified addresses.
    *
    * This must be called from the primary EventBase thread.
@@ -342,6 +367,16 @@ class AsyncServerSocket : public DelayedDestruction, public AsyncSocketBase {
    * Throws AsyncSocketException on error.
    */
   virtual void bind(const std::vector<IPAddress>& ipAddresses, uint16_t port);
+
+  /**
+   * Bind to the specified port for the specified addresses/if names.
+   *
+   * This must be called from the primary EventBase thread.
+   *
+   * Throws AsyncSocketException on error.
+   */
+  virtual void bind(
+      const std::vector<IPAddressIfNamePair>& addresses, uint16_t port);
 
   /**
    * Bind to the specified port.
@@ -741,21 +776,31 @@ class AsyncServerSocket : public DelayedDestruction, public AsyncSocketBase {
   ~AsyncServerSocket() override;
 
  private:
-  enum class MessageType { MSG_NEW_CONN = 0, MSG_ERROR = 1 };
+  class RemoteAcceptor;
 
-  struct QueueMessage {
-    MessageType type;
+  struct NewConnMessage {
     NetworkSocket fd;
-    int err;
-    SocketAddress address;
-    std::string msg;
+    SocketAddress clientAddr;
     std::chrono::steady_clock::time_point deadline;
 
     bool isExpired() const {
       return deadline.time_since_epoch().count() != 0 &&
           std::chrono::steady_clock::now() > deadline;
     }
+
+    AtomicNotificationQueueTaskStatus operator()(
+        RemoteAcceptor& acceptor) noexcept;
   };
+
+  struct ErrorMessage {
+    int err;
+    std::string msg;
+
+    AtomicNotificationQueueTaskStatus operator()(
+        RemoteAcceptor& acceptor) noexcept;
+  };
+
+  using QueueMessage = boost::variant<NewConnMessage, ErrorMessage>;
 
   /**
    * A class to receive notifications to invoke AcceptCallback objects
@@ -768,11 +813,18 @@ class AsyncServerSocket : public DelayedDestruction, public AsyncSocketBase {
    */
   class RemoteAcceptor {
     struct Consumer {
-      AtomicNotificationQueueTaskStatus operator()(QueueMessage&& msg) noexcept;
+      AtomicNotificationQueueTaskStatus operator()(
+          QueueMessage&& msg) noexcept {
+        return boost::apply_visitor(
+            [this](auto& visitMsg) { return visitMsg(acceptor_); }, msg);
+      }
 
       explicit Consumer(RemoteAcceptor& acceptor) : acceptor_(acceptor) {}
       RemoteAcceptor& acceptor_;
     };
+
+    friend NewConnMessage;
+    friend ErrorMessage;
 
    public:
     using Queue = EventBaseAtomicNotificationQueue<QueueMessage, Consumer>;
@@ -816,8 +868,12 @@ class AsyncServerSocket : public DelayedDestruction, public AsyncSocketBase {
 
   NetworkSocket createSocket(int family);
   void setupSocket(NetworkSocket fd, int family);
+  void bindInternal(const SocketAddress& address, const std::string& ifName);
   void bindSocket(
-      NetworkSocket fd, const SocketAddress& address, bool isExistingSocket);
+      NetworkSocket fd,
+      const SocketAddress& address,
+      bool isExistingSocket,
+      const std::string& ifName);
   void dispatchSocket(NetworkSocket socket, SocketAddress&& address);
   void dispatchError(const char* msg, int errnoValue);
   void enterBackoff();

@@ -21,7 +21,7 @@
 #include <thread>
 #include <vector>
 
-#include <folly/Format.h>
+#include <fmt/ostream.h>
 #include <folly/portability/GTest.h>
 #include <folly/synchronization/test/Barrier.h>
 
@@ -67,8 +67,9 @@ bool operator==(const CtorCounts& lhs, const CtorCounts& rhs) {
 }
 
 std::ostream& operator<<(std::ostream& out, const CtorCounts& counts) {
-  return out << folly::format(
-             "CtorCounts({}, {}, {})", counts.ctor, counts.copy, counts.move);
+  fmt::print(
+      out, "CtorCounts({}, {}, {})", counts.ctor, counts.copy, counts.move);
+  return out;
 }
 } // namespace
 
@@ -245,7 +246,7 @@ struct WithOneByte {
 
 using DelayedInitSizeTestTypes =
     testing::Types<char, short, int, long, long long, char[3], short[2]>;
-TYPED_TEST_CASE(DelayedInitSizeTest, DelayedInitSizeTestTypes);
+TYPED_TEST_SUITE(DelayedInitSizeTest, DelayedInitSizeTestTypes);
 
 TYPED_TEST(DelayedInitSizeTest, Size) {
   // DelayedInit should not add more than 1-byte size overhead (modulo padding)

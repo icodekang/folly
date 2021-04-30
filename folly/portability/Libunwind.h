@@ -16,23 +16,6 @@
 
 #pragma once
 
-#include <cstddef>
-
-#if __has_include(<demangle.h>)
-#define FOLLY_DETAIL_HAVE_DEMANGLE_H 1
-#else
-#define FOLLY_DETAIL_HAVE_DEMANGLE_H 0
+#if __has_include(<libunwind.h>)
+#include <libunwind.h> // @manual
 #endif
-
-namespace folly {
-namespace detail {
-
-extern int cplus_demangle_v3_callback_wrapper(
-    char const* mangled,
-    void (*cbref)(char const*, std::size_t, void*),
-    void* opaque);
-
-extern char* cplus_demangle_v3_wrapper(const char* mangled);
-
-} // namespace detail
-} // namespace folly

@@ -23,7 +23,6 @@
 #include <folly/Benchmark.h>
 #include <folly/portability/GFlags.h>
 #include <folly/portability/GTest.h>
-#include <folly/portability/Semaphore.h>
 #include <folly/test/DeterministicSchedule.h>
 
 using namespace folly;
@@ -117,7 +116,7 @@ struct AtomicUnorderedInsertMapTest : public ::testing::Test {};
 // uint16_t doesn't make sense for most platforms, but we might as well
 // test it
 using IndexTypesToTest = ::testing::Types<uint16_t, uint32_t, uint64_t>;
-TYPED_TEST_CASE(AtomicUnorderedInsertMapTest, IndexTypesToTest);
+TYPED_TEST_SUITE(AtomicUnorderedInsertMapTest, IndexTypesToTest);
 
 TYPED_TEST(AtomicUnorderedInsertMapTest, basic) {
   UIM<std::string,

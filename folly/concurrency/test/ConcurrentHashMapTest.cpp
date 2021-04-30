@@ -166,6 +166,9 @@ TYPED_TEST_P(ConcurrentHashMapTest, EmplaceTest) {
   foomap.emplace(1, foo());
   EXPECT_EQ(foo::moved, 1);
   EXPECT_EQ(foo::copied, 0);
+  // Reset the counters. Repeated tests are allowed
+  foo::moved = 0;
+  foo::copied = 0;
 }
 
 TYPED_TEST_P(ConcurrentHashMapTest, MapInsertIteratorValueTest) {
@@ -934,7 +937,9 @@ TYPED_TEST_P(ConcurrentHashMapTest, HeterogeneousInsert) {
 
   map.insert("foo", "baz");
   EXPECT_TRUE(map.assign(foo, "hello2"));
-  EXPECT_TRUE(map.assign_if_equal("foo", "hello2", "hello"));
+  auto mbIt = map.assign_if_equal("foo", "hello2", "hello");
+  EXPECT_TRUE(mbIt);
+  EXPECT_EQ(mbIt.value()->second, "hello");
   EXPECT_EQ(map[foo], "hello");
   auto it = map.find(foo);
   map.erase(it);

@@ -32,7 +32,6 @@
 #include <folly/experimental/coro/Invoke.h>
 #include <folly/experimental/coro/Result.h>
 #include <folly/experimental/coro/Traits.h>
-#include <folly/experimental/coro/Utils.h>
 #include <folly/experimental/coro/ViaIfAsync.h>
 #include <folly/experimental/coro/WithAsyncStack.h>
 #include <folly/experimental/coro/WithCancellation.h>
@@ -79,12 +78,12 @@ class TaskPromiseBase {
   TaskPromiseBase() noexcept {}
 
   template <typename Promise>
-  AwaitableVariant<FinalAwaiter, AwaitableReady<void>> do_safe_point(
+  variant_awaitable<FinalAwaiter, ready_awaitable<>> do_safe_point(
       Promise& promise) noexcept {
     if (cancelToken_.isCancellationRequested()) {
       return promise.yield_value(co_cancelled);
     }
-    return AwaitableReady<void>{};
+    return ready_awaitable<>{};
   }
 
  public:
@@ -109,16 +108,16 @@ class TaskPromiseBase {
   }
 
   auto await_transform(co_current_executor_t) noexcept {
-    return AwaitableReady<folly::Executor*>{executor_.get()};
+    return ready_awaitable<folly::Executor*>{executor_.get()};
   }
 
   auto await_transform(co_current_cancellation_token_t) noexcept {
-    return AwaitableReady<const folly::CancellationToken&>{cancelToken_};
+    return ready_awaitable<const folly::CancellationToken&>{cancelToken_};
   }
 
-  void setCancelToken(const folly::CancellationToken& cancelToken) noexcept {
+  void setCancelToken(folly::CancellationToken&& cancelToken) noexcept {
     if (!hasCancelTokenOverride_) {
-      cancelToken_ = cancelToken;
+      cancelToken_ = std::move(cancelToken);
       hasCancelTokenOverride_ = true;
     }
   }
@@ -159,9 +158,7 @@ class TaskPromise : public TaskPromiseBase {
         exception_wrapper::from_exception_ptr(std::current_exception()));
   }
 
-  void return_value(T&& t) { result_.emplace(static_cast<T&&>(t)); }
-
-  template <typename U>
+  template <typename U = T>
   void return_value(U&& value) {
     if constexpr (std::is_same_v<remove_cvref_t<U>, Try<StorageType>>) {
       DCHECK(value.hasValue() || value.hasException());
@@ -363,8 +360,11 @@ class FOLLY_NODISCARD TaskWithExecutor {
   detail::InlineTaskDetached startImpl(TaskWithExecutor task, F cb) {
     try {
       cb(co_await folly::coro::co_awaitTry(std::move(task)));
+// This causes clang internal error on Windows.
+#if !(defined(_WIN32) && defined(__clang__))
     } catch (const std::exception& e) {
       cb(Try<StorageType>(exception_wrapper(std::current_exception(), e)));
+#endif
     } catch (...) {
       cb(Try<StorageType>(exception_wrapper(std::current_exception())));
     }
@@ -374,8 +374,11 @@ class FOLLY_NODISCARD TaskWithExecutor {
   detail::InlineTaskDetached startInlineImpl(TaskWithExecutor task, F cb) {
     try {
       cb(co_await InlineTryAwaitable{std::exchange(task.coro_, {})});
+// This causes clang internal error on Windows.
+#if !(defined(_WIN32) && defined(__clang__))
     } catch (const std::exception& e) {
       cb(Try<StorageType>(exception_wrapper(std::current_exception(), e)));
+#endif
     } catch (...) {
       cb(Try<StorageType>(exception_wrapper(std::current_exception())));
     }
@@ -507,10 +510,9 @@ class FOLLY_NODISCARD TaskWithExecutor {
   }
 
   friend TaskWithExecutor co_withCancellation(
-      const folly::CancellationToken& cancelToken,
-      TaskWithExecutor&& task) noexcept {
+      folly::CancellationToken cancelToken, TaskWithExecutor&& task) noexcept {
     DCHECK(task.coro_);
-    task.coro_.promise().setCancelToken(cancelToken);
+    task.coro_.promise().setCancelToken(std::move(cancelToken));
     return std::move(task);
   }
 
@@ -562,6 +564,7 @@ class FOLLY_NODISCARD Task {
 
   void setExecutor(folly::Executor::KeepAlive<>&& e) noexcept {
     DCHECK(coro_);
+    DCHECK(e);
     coro_.promise().executor_ = std::move(e);
   }
 
@@ -624,14 +627,15 @@ class FOLLY_NODISCARD Task {
   }
 
   friend Task co_withCancellation(
-      const folly::CancellationToken& cancelToken, Task&& task) noexcept {
+      folly::CancellationToken cancelToken, Task&& task) noexcept {
     DCHECK(task.coro_);
-    task.coro_.promise().setCancelToken(cancelToken);
+    task.coro_.promise().setCancelToken(std::move(cancelToken));
     return std::move(task);
   }
 
   template <typename F, typename... A, typename F_, typename... A_>
-  friend Task folly_co_invoke(tag_t<Task, F, A...>, F_ f, A_... a) {
+  friend Task tag_invoke(
+      tag_t<co_invoke_fn>, tag_t<Task, F, A...>, F_ f, A_... a) {
     co_return co_await invoke(static_cast<F&&>(f), static_cast<A&&>(a)...);
   }
 

@@ -128,16 +128,32 @@ EventBaseBackend::~EventBaseBackend() {
   event_base_free(evb_);
 }
 
+class ExecutionObserverScopeGuard {
+ public:
+  ExecutionObserverScopeGuard(folly::ExecutionObserver* observer, void* id)
+      : observer_(observer), id_{reinterpret_cast<uintptr_t>(id)} {
+    if (observer_) {
+      observer_->starting(id_);
+    }
+  }
+
+  ~ExecutionObserverScopeGuard() {
+    if (observer_) {
+      observer_->stopped(id_);
+    }
+  }
+
+ private:
+  folly::ExecutionObserver* observer_;
+  uintptr_t id_;
+};
 } // namespace
 
 namespace folly {
 
 class EventBase::FuncRunner {
  public:
-  void operator()(Func&& func) noexcept {
-    func();
-    func = nullptr;
-  }
+  void operator()(Func func) noexcept { func(); }
 };
 
 /*
@@ -220,11 +236,13 @@ EventBase::~EventBase() {
 
   // Stop consumer before deleting NotificationQueue
   queue_->stopConsuming();
-  evb_.reset();
 
   for (auto storage : localStorageToDtor_) {
     storage->onEventBaseDestruction(*this);
   }
+  localStorage_.clear();
+
+  evb_.reset();
 
   VLOG(5) << "EventBase(): Destroyed.";
 }
@@ -293,7 +311,7 @@ void EventBase::waitUntilRunning() {
 
 // enters the event_base loop -- will only exit when forced to
 bool EventBase::loop() {
-  ExecutorBlockingGuard guard{ExecutorBlockingGuard::ForbidTag{}, executorName};
+  ExecutorBlockingGuard guard{ExecutorBlockingGuard::TrackTag{}, executorName};
   return loopBody();
 }
 
@@ -365,11 +383,7 @@ bool EventBase::loopBody(int flags, bool ignoreKeepAlive) {
     LoopCallbackList callbacks;
     callbacks.swap(runBeforeLoopCallbacks_);
 
-    while (!callbacks.empty()) {
-      auto* item = &callbacks.front();
-      callbacks.pop_front();
-      item->runLoopCallback();
-    }
+    runLoopCallbacks(callbacks);
 
     // nobody can add loop callbacks from within this thread if
     // we don't have to handle anything to start with...
@@ -432,6 +446,7 @@ bool EventBase::loopBody(int flags, bool ignoreKeepAlive) {
       // run.  Run them manually if so, and continue looping.
       //
       if (!queue_->empty()) {
+        ExecutionObserverScopeGuard guard(executionObserver_, queue_.get());
         queue_->execute();
       } else if (!ranLoopCallbacks) {
         // If there were no more events and we also didn't have any loop
@@ -658,6 +673,16 @@ void EventBase::runImmediatelyOrRunInEventBaseThreadAndWait(Func fn) noexcept {
   }
 }
 
+void EventBase::runLoopCallbacks(LoopCallbackList& currentCallbacks) {
+  while (!currentCallbacks.empty()) {
+    LoopCallback* callback = &currentCallbacks.front();
+    currentCallbacks.pop_front();
+    folly::RequestContextScopeGuard rctx(std::move(callback->context_));
+    ExecutionObserverScopeGuard guard(executionObserver_, callback);
+    callback->runLoopCallback();
+  }
+}
+
 bool EventBase::runLoopCallbacks() {
   bumpHandlingTime();
   if (!loopCallbacks_.empty()) {
@@ -673,12 +698,7 @@ bool EventBase::runLoopCallbacks() {
     currentCallbacks.swap(loopCallbacks_);
     runOnceCallbacks_ = &currentCallbacks;
 
-    while (!currentCallbacks.empty()) {
-      LoopCallback* callback = &currentCallbacks.front();
-      currentCallbacks.pop_front();
-      folly::RequestContextScopeGuard rctx(std::move(callback->context_));
-      callback->runLoopCallback();
-    }
+    runLoopCallbacks(currentCallbacks);
 
     runOnceCallbacks_ = nullptr;
     return true;

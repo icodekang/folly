@@ -61,11 +61,15 @@ struct Printer {
   void operator()(dynamic const& v) const {
     switch (v.type()) {
       case dynamic::DOUBLE:
-        if (!opts_.allow_nan_inf &&
-            (std::isnan(v.asDouble()) || std::isinf(v.asDouble()))) {
-          throw json::parse_error(
-              "folly::toJson: JSON object value was a "
-              "NaN or INF");
+        if (!opts_.allow_nan_inf) {
+          if (std::isnan(v.asDouble())) {
+            throw json::print_error(
+                "folly::toJson: JSON object value was a NaN");
+          }
+          if (std::isinf(v.asDouble())) {
+            throw json::print_error(
+                "folly::toJson: JSON object value was an INF");
+          }
         }
         toAppend(
             v.asDouble(), &out_, opts_.double_mode, opts_.double_num_digits);
@@ -103,7 +107,7 @@ struct Printer {
  private:
   void printKV(const std::pair<const dynamic, dynamic>& p) const {
     if (!opts_.allow_non_string_keys && !p.first.isString()) {
-      throw json::parse_error(
+      throw json::print_error(
           "folly::toJson: JSON object key was not a "
           "string");
     }
@@ -189,7 +193,8 @@ struct Printer {
 
   void newline() const {
     if (indentLevel_) {
-      out_ += to<std::string>('\n', std::string(*indentLevel_ * 2, ' '));
+      auto indent = *indentLevel_ * opts_.pretty_formatting_indent_width;
+      out_ += to<std::string>('\n', std::string(indent, ' '));
     }
   }
 

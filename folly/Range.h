@@ -41,7 +41,9 @@
 #include <string_view> // @manual
 #endif
 
+#if __has_include(<fmt/format.h>)
 #include <fmt/format.h>
+#endif
 
 #include <folly/CpuId.h>
 #include <folly/Likely.h>
@@ -249,7 +251,7 @@ class Range {
               std::declval<Container const&>().data() +
               std::declval<Container const&>().size()))>
   /* implicit */ constexpr Range(Container const& container)
-      : b_(container.data()), e_(b_ + container.size()) {}
+      : Range(container.data(), container.size()) {}
 
   template <
       class Container,
@@ -474,7 +476,7 @@ class Range {
   template <typename ValueType>
   struct StringViewType
       : std::conditional<
-            std::is_pod<std::remove_const_t<ValueType>>::value,
+            std::is_trivial<std::remove_const_t<ValueType>>::value,
             std::basic_string_view<std::remove_const_t<ValueType>>,
             NotStringView> {};
 
@@ -1526,12 +1528,21 @@ FOLLY_POP_WARNING
 
 FOLLY_ASSUME_FBVECTOR_COMPATIBLE_1(folly::Range)
 
-// Tell the range-v3 library that this type should satisfy
-// the view concept (a lightweight, non-owning range).
+// Unfortunately it is not possible to forward declare enable_view under
+// MSVC 2019.8 due to compiler bugs, so we need to include the actual
+// definition if available.
+#if __has_include(<range/v3/range/concepts.hpp>) && defined(_MSC_VER) && _MSC_VER >= 1920
+#include <range/v3/range/concepts.hpp> // @manual
+#else
 namespace ranges {
 template <class T>
 extern const bool enable_view;
+} // namespace ranges
+#endif
 
+// Tell the range-v3 library that this type should satisfy
+// the view concept (a lightweight, non-owning range).
+namespace ranges {
 template <class Iter>
 FOLLY_INLINE_VARIABLE constexpr bool enable_view<::folly::Range<Iter>> = true;
 } // namespace ranges

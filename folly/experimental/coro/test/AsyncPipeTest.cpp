@@ -16,8 +16,6 @@
 
 #include <folly/Portability.h>
 
-#if FOLLY_HAS_COROUTINES
-
 #include <folly/experimental/coro/AsyncGenerator.h>
 #include <folly/experimental/coro/AsyncPipe.h>
 #include <folly/experimental/coro/BlockingWait.h>
@@ -26,6 +24,8 @@
 #include <folly/portability/GTest.h>
 
 #include <string>
+
+#if FOLLY_HAS_COROUTINES
 
 TEST(AsyncPipeTest, PublishConsume) {
   auto pipe = folly::coro::AsyncPipe<int>::create();
@@ -147,6 +147,14 @@ TEST(AsyncPipeTest, BrokenPipe) {
   EXPECT_TRUE(pipe.second.write(0));
   { auto gen = std::move(pipe.first); }
   EXPECT_FALSE(pipe.second.write(0));
+  std::move(pipe.second).close();
+}
+
+TEST(AsyncPipeTest, IsClosed) {
+  auto pipe = folly::coro::AsyncPipe<int>::create();
+  EXPECT_FALSE(pipe.second.isClosed());
+  { auto gen = std::move(pipe.first); }
+  EXPECT_TRUE(pipe.second.isClosed());
   std::move(pipe.second).close();
 }
 
@@ -354,7 +362,14 @@ TEST(BoundedAsyncPipeTest, PublisherBlocks) {
       co_await pipe.write(i);
     }
 
-    auto writeFuture = pipe.write(20).scheduleOn(&executor).start();
+    // wrap in co_invoke() here, since write() accepts arguments by reference,
+    // and temporaries may go out of scope
+    auto writeFuture =
+        folly::coro::co_invoke([&pipe = pipe]() -> folly::coro::Task<bool> {
+          co_return co_await pipe.write(20);
+        })
+            .scheduleOn(&executor)
+            .start();
     executor.drain();
     EXPECT_FALSE(writeFuture.isReady());
 
@@ -364,6 +379,18 @@ TEST(BoundedAsyncPipeTest, PublisherBlocks) {
     executor.drain();
     EXPECT_TRUE(writeFuture.isReady());
   }());
+}
+
+TEST(BoundedAsyncPipeTest, IsClosed) {
+  auto [generator, pipe] =
+      folly::coro::BoundedAsyncPipe<int>::create(/* tokens */ 2);
+
+  EXPECT_FALSE(pipe.isClosed());
+  {
+    // destroy the read end
+    auto _ = std::move(generator);
+  }
+  EXPECT_TRUE(pipe.isClosed());
 }
 
 TEST(BoundedAsyncPipeTest, BlockingPublisherCanceledOnDestroy) {
@@ -378,7 +405,12 @@ TEST(BoundedAsyncPipeTest, BlockingPublisherCanceledOnDestroy) {
 
     std::vector<folly::SemiFuture<bool>> futures;
     for (size_t i = 0; i < 5; ++i) {
-      auto writeFuture = pipe.write(20).scheduleOn(&executor).start();
+      auto writeFuture =
+          folly::coro::co_invoke([&pipe = pipe]() -> folly::coro::Task<bool> {
+            co_return co_await pipe.write(20);
+          })
+              .scheduleOn(&executor)
+              .start();
       executor.drain();
       EXPECT_FALSE(writeFuture.isReady());
       futures.emplace_back(std::move(writeFuture));

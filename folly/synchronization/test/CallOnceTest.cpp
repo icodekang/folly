@@ -49,7 +49,7 @@ class FollyCallOnce : public testing::Test {
 
 using OnceFlagTypes =
     testing::Types<folly::once_flag, folly::compact_once_flag>;
-TYPED_TEST_CASE(FollyCallOnce, OnceFlagTypes);
+TYPED_TEST_SUITE(FollyCallOnce, OnceFlagTypes);
 
 TYPED_TEST(FollyCallOnce, Simple) {
   typename TestFixture::OnceFlag flag;
@@ -134,4 +134,13 @@ TYPED_TEST(FollyCallOnce, TryCallOnce) {
   EXPECT_FALSE(folly::test_once(once));
   EXPECT_TRUE(folly::try_call_once(once, []() noexcept { return true; }));
   EXPECT_TRUE(folly::test_once(once));
+}
+
+TYPED_TEST(FollyCallOnce, ResetOnce) {
+  typename TestFixture::OnceFlag once;
+  EXPECT_FALSE(folly::test_once(once));
+  folly::call_once(once, [] {});
+  EXPECT_TRUE(folly::test_once(once));
+  folly::reset_once(once);
+  EXPECT_FALSE(folly::test_once(once));
 }

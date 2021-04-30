@@ -34,6 +34,7 @@
 #include <folly/lang/Align.h>
 #include <folly/lang/Exception.h>
 #include <folly/memory/Malloc.h>
+#include <folly/memory/SanitizeAddress.h>
 
 using std::unique_ptr;
 
@@ -276,6 +277,21 @@ unique_ptr<IOBuf> IOBuf::create(std::size_t capacity) {
   if (capacity <= kDefaultCombinedBufSize) {
     return createCombined(capacity);
   }
+
+  // if we have nallocx, we want to allocate the capacity and the overhead in
+  // a single allocation only if we do not cross into the next allocation class
+  // for some buffer sizes, this can use about 25% extra memory
+  if (canNallocx()) {
+    auto mallocSize = goodMallocSize(capacity);
+    // round capacity to a multiple of 8
+    size_t minSize = ((capacity + 7) & ~7) + sizeof(SharedInfo);
+    // if we do not have space for the overhead, allocate the mem separateley
+    if (mallocSize < minSize) {
+      auto* buf = checkedMalloc(mallocSize);
+      return takeOwnership(buf, mallocSize, static_cast<size_t>(0));
+    }
+  }
+
   return createSeparate(capacity);
 }
 
@@ -344,13 +360,14 @@ IOBuf::IOBuf(
     TakeOwnershipOp,
     void* buf,
     std::size_t capacity,
+    std::size_t offset,
     std::size_t length,
     FreeFunction freeFn,
     void* userData,
     bool freeOnError)
     : next_(this),
       prev_(this),
-      data_(static_cast<uint8_t*>(buf)),
+      data_(static_cast<uint8_t*>(buf) + offset),
       buf_(static_cast<uint8_t*>(buf)),
       length_(length),
       capacity_(capacity),
@@ -370,6 +387,7 @@ IOBuf::IOBuf(
 unique_ptr<IOBuf> IOBuf::takeOwnership(
     void* buf,
     std::size_t capacity,
+    std::size_t offset,
     std::size_t length,
     FreeFunction freeFn,
     void* userData,
@@ -400,7 +418,7 @@ unique_ptr<IOBuf> IOBuf::takeOwnership(
       packFlagsAndSharedInfo(0, &storage->shared),
       static_cast<uint8_t*>(buf),
       capacity,
-      static_cast<uint8_t*>(buf),
+      static_cast<uint8_t*>(buf) + offset,
       length));
 
   rollback.dismiss();
@@ -483,6 +501,8 @@ IOBuf::IOBuf(
       flagsAndSharedInfo_(flagsAndSharedInfo) {
   assert(data >= buf);
   assert(data + length <= buf + capacity);
+
+  CHECK(!folly::asan_region_is_poisoned(buf, capacity));
 }
 
 IOBuf::~IOBuf() {

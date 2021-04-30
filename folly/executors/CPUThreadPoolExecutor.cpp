@@ -14,8 +14,10 @@
  * limitations under the License.
  */
 
+#include <folly/Executor.h>
 #include <folly/executors/CPUThreadPoolExecutor.h>
 
+#include <atomic>
 #include <folly/Memory.h>
 #include <folly/concurrency/QueueObserver.h>
 #include <folly/executors/task_queue/PriorityLifoSemMPMCQueue.h>
@@ -47,72 +49,86 @@ const size_t CPUThreadPoolExecutor::kDefaultMaxQueueSize = 1 << 14;
 CPUThreadPoolExecutor::CPUThreadPoolExecutor(
     size_t numThreads,
     std::unique_ptr<BlockingQueue<CPUTask>> taskQueue,
-    std::shared_ptr<ThreadFactory> threadFactory)
-    : ThreadPoolExecutor(
-          numThreads,
-          FLAGS_dynamic_cputhreadpoolexecutor ? 0 : numThreads,
-          std::move(threadFactory)),
-      taskQueue_(taskQueue.release()) {
-  setNumThreads(numThreads);
-  registerThreadPoolExecutor(this);
-}
+    std::shared_ptr<ThreadFactory> threadFactory,
+    Options opt)
+    : CPUThreadPoolExecutor(
+          std::make_pair(
+              numThreads, FLAGS_dynamic_cputhreadpoolexecutor ? 0 : numThreads),
+          std::move(taskQueue),
+          std::move(threadFactory),
+          std::move(opt)) {}
 
 CPUThreadPoolExecutor::CPUThreadPoolExecutor(
     std::pair<size_t, size_t> numThreads,
     std::unique_ptr<BlockingQueue<CPUTask>> taskQueue,
-    std::shared_ptr<ThreadFactory> threadFactory)
+    std::shared_ptr<ThreadFactory> threadFactory,
+    Options opt)
     : ThreadPoolExecutor(
           numThreads.first, numThreads.second, std::move(threadFactory)),
-      taskQueue_(taskQueue.release()) {
+      taskQueue_(taskQueue.release()),
+      prohibitBlockingOnThreadPools_{opt.blocking} {
   setNumThreads(numThreads.first);
+  if (numThreads.second == 0) {
+    minThreads_.store(1, std::memory_order_relaxed);
+  }
   registerThreadPoolExecutor(this);
 }
 
 CPUThreadPoolExecutor::CPUThreadPoolExecutor(
-    size_t numThreads, std::shared_ptr<ThreadFactory> threadFactory)
-    : ThreadPoolExecutor(
-          numThreads,
-          FLAGS_dynamic_cputhreadpoolexecutor ? 0 : numThreads,
-          std::move(threadFactory)),
-      taskQueue_(std::allocate_shared<default_queue>(default_queue_alloc{})) {
-  setNumThreads(numThreads);
-  registerThreadPoolExecutor(this);
-}
+    size_t numThreads,
+    std::shared_ptr<ThreadFactory> threadFactory,
+    Options opt)
+    : CPUThreadPoolExecutor(
+          std::make_pair(
+              numThreads, FLAGS_dynamic_cputhreadpoolexecutor ? 0 : numThreads),
+          std::move(threadFactory),
+          std::move(opt)) {}
 
 CPUThreadPoolExecutor::CPUThreadPoolExecutor(
     std::pair<size_t, size_t> numThreads,
-    std::shared_ptr<ThreadFactory> threadFactory)
+    std::shared_ptr<ThreadFactory> threadFactory,
+    Options opt)
     : ThreadPoolExecutor(
           numThreads.first, numThreads.second, std::move(threadFactory)),
-      taskQueue_(std::allocate_shared<default_queue>(default_queue_alloc{})) {
+      taskQueue_(std::allocate_shared<default_queue>(default_queue_alloc{})),
+      prohibitBlockingOnThreadPools_{opt.blocking} {
   setNumThreads(numThreads.first);
+  if (numThreads.second == 0) {
+    minThreads_.store(1, std::memory_order_relaxed);
+  }
   registerThreadPoolExecutor(this);
 }
 
-CPUThreadPoolExecutor::CPUThreadPoolExecutor(size_t numThreads)
+CPUThreadPoolExecutor::CPUThreadPoolExecutor(size_t numThreads, Options opt)
     : CPUThreadPoolExecutor(
-          numThreads, std::make_shared<NamedThreadFactory>("CPUThreadPool")) {}
+          numThreads,
+          std::make_shared<NamedThreadFactory>("CPUThreadPool"),
+          std::move(opt)) {}
 
 CPUThreadPoolExecutor::CPUThreadPoolExecutor(
     size_t numThreads,
     int8_t numPriorities,
-    std::shared_ptr<ThreadFactory> threadFactory)
+    std::shared_ptr<ThreadFactory> threadFactory,
+    Options opt)
     : CPUThreadPoolExecutor(
           numThreads,
           std::make_unique<PriorityUnboundedBlockingQueue<CPUTask>>(
               numPriorities),
-          std::move(threadFactory)) {}
+          std::move(threadFactory),
+          std::move(opt)) {}
 
 CPUThreadPoolExecutor::CPUThreadPoolExecutor(
     size_t numThreads,
     int8_t numPriorities,
     size_t maxQueueSize,
-    std::shared_ptr<ThreadFactory> threadFactory)
+    std::shared_ptr<ThreadFactory> threadFactory,
+    Options opt)
     : CPUThreadPoolExecutor(
           numThreads,
           std::make_unique<PriorityLifoSemMPMCQueue<CPUTask>>(
               numPriorities, maxQueueSize),
-          std::move(threadFactory)) {}
+          std::move(threadFactory),
+          std::move(opt)) {}
 
 CPUThreadPoolExecutor::~CPUThreadPoolExecutor() {
   deregisterThreadPoolExecutor(this);
@@ -159,15 +175,7 @@ void CPUThreadPoolExecutor::add(Func func) {
 
 void CPUThreadPoolExecutor::add(
     Func func, std::chrono::milliseconds expiration, Func expireCallback) {
-  CPUTask task{std::move(func), expiration, std::move(expireCallback), 0};
-  if (auto queueObserver = getQueueObserver(0)) {
-    task.queueObserverPayload() =
-        queueObserver->onEnqueued(task.context_.get());
-  }
-  auto result = taskQueue_->add(std::move(task));
-  if (!result.reusedThread) {
-    ensureActiveThreads();
-  }
+  addImpl<false>(std::move(func), 0, expiration, std::move(expireCallback));
 }
 
 void CPUThreadPoolExecutor::addWithPriority(Func func, int8_t priority) {
@@ -179,15 +187,43 @@ void CPUThreadPoolExecutor::add(
     int8_t priority,
     std::chrono::milliseconds expiration,
     Func expireCallback) {
-  CHECK(getNumPriorities() > 0);
+  addImpl<true>(
+      std::move(func), priority, expiration, std::move(expireCallback));
+}
+
+template <bool withPriority>
+void CPUThreadPoolExecutor::addImpl(
+    Func func,
+    int8_t priority,
+    std::chrono::milliseconds expiration,
+    Func expireCallback) {
+  if (withPriority) {
+    CHECK(getNumPriorities() > 0);
+  }
   CPUTask task(
       std::move(func), expiration, std::move(expireCallback), priority);
   if (auto queueObserver = getQueueObserver(priority)) {
     task.queueObserverPayload() =
         queueObserver->onEnqueued(task.context_.get());
   }
-  auto result = taskQueue_->addWithPriority(std::move(task), priority);
-  if (!result.reusedThread) {
+
+  // It's not safe to expect that the executor is alive after a task is added to
+  // the queue (this task could be holding the last KeepAlive and when finished
+  // - it may unblock the executor shutdown).
+  // If we need executor to be alive after adding into the queue, we have to
+  // acquire a KeepAlive.
+  bool mayNeedToAddThreads = minThreads_.load(std::memory_order_relaxed) == 0 ||
+      activeThreads_.load(std::memory_order_relaxed) <
+          maxThreads_.load(std::memory_order_relaxed);
+  folly::Executor::KeepAlive<> ka = mayNeedToAddThreads
+      ? getKeepAliveToken(this)
+      : folly::Executor::KeepAlive<>{};
+
+  auto result = withPriority
+      ? taskQueue_->addWithPriority(std::move(task), priority)
+      : taskQueue_->add(std::move(task));
+
+  if (mayNeedToAddThreads && !result.reusedThread) {
     ensureActiveThreads();
   }
 }
@@ -229,7 +265,15 @@ bool CPUThreadPoolExecutor::taskShouldStop(folly::Optional<CPUTask>& task) {
 
 void CPUThreadPoolExecutor::threadRun(ThreadPtr thread) {
   this->threadPoolHook_.registerThread();
-  ExecutorBlockingGuard guard{ExecutorBlockingGuard::ForbidTag{}, executorName};
+  auto guard = [&]() {
+    if (prohibitBlockingOnThreadPools_ == Options::Blocking::prohibit) {
+      return ExecutorBlockingGuard{
+          ExecutorBlockingGuard::ProhibitTag{}, executorName};
+    } else {
+      return ExecutorBlockingGuard{
+          ExecutorBlockingGuard::TrackTag{}, executorName};
+    }
+  }();
 
   thread->startupBaton.post();
   while (true) {

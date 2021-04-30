@@ -88,6 +88,8 @@ using ExpectedErrorType =
 namespace expected_detail {
 
 template <typename Value, typename Error>
+struct Promise;
+template <typename Value, typename Error>
 struct PromiseReturn;
 
 template <template <class...> class Trait, class... Ts>
@@ -821,6 +823,8 @@ class Expected final : expected_detail::ExpectedStorage<Value, Error> {
   template <class U>
   using rebind = Expected<U, Error>;
 
+  using promise_type = expected_detail::Promise<Value, Error>;
+
   static_assert(
       !std::is_reference<Value>::value,
       "Expected may not be used with reference types");
@@ -1320,7 +1324,7 @@ bool operator>(const Value& other, const Expected<Value, Error>&) = delete;
 // Enable the use of folly::Expected with `co_await`
 // Inspired by https://github.com/toby-allsopp/coroutine_monad
 #if FOLLY_HAS_COROUTINES
-#include <experimental/coroutine>
+#include <folly/experimental/coro/Coroutine.h>
 
 namespace folly {
 namespace expected_detail {
@@ -1353,11 +1357,9 @@ struct Promise {
   // or:
   //    auto retobj = p.get_return_object(); // clang
   PromiseReturn<Value, Error> get_return_object() noexcept { return *this; }
-  std::experimental::suspend_never initial_suspend() const noexcept {
-    return {};
-  }
-  std::experimental::suspend_never final_suspend() const noexcept { return {}; }
-  template <typename U>
+  coro::suspend_never initial_suspend() const noexcept { return {}; }
+  coro::suspend_never final_suspend() const noexcept { return {}; }
+  template <typename U = Value>
   void return_value(U&& u) {
     value_->emplace(static_cast<U&&>(u));
   }
@@ -1379,7 +1381,7 @@ struct Awaitable {
 
   // Explicitly only allow suspension into a Promise
   template <typename U>
-  void await_suspend(std::experimental::coroutine_handle<Promise<U, Error>> h) {
+  void await_suspend(coro::coroutine_handle<Promise<U, Error>> h) {
     *h.promise().value_ = makeUnexpected(std::move(o_.error()));
     // Abort the rest of the coroutine. resume() is not going to be called
     h.destroy();
@@ -1393,14 +1395,4 @@ expected_detail::Awaitable<Value, Error>
   return expected_detail::Awaitable<Value, Error>{std::move(o)};
 }
 } // namespace folly
-
-// This makes folly::Expected<Value> useable as a coroutine return type...
-namespace std {
-namespace experimental {
-template <typename Value, typename Error, typename... Args>
-struct coroutine_traits<folly::Expected<Value, Error>, Args...> {
-  using promise_type = folly::expected_detail::Promise<Value, Error>;
-};
-} // namespace experimental
-} // namespace std
 #endif // FOLLY_HAS_COROUTINES

@@ -16,13 +16,14 @@
 
 #include <folly/concurrency/CacheLocality.h>
 
+#include <memory>
+#include <thread>
+#include <unordered_map>
+
 #include <folly/portability/GTest.h>
 #include <folly/portability/SysResource.h>
 
 #include <glog/logging.h>
-#include <memory>
-#include <thread>
-#include <unordered_map>
 
 using namespace folly;
 
@@ -1040,19 +1041,16 @@ TEST(Getcpu, VdsoGetcpu) {
 }
 #endif
 
-#ifdef FOLLY_CL_USE_FOLLY_TLS
 TEST(ThreadId, SimpleTls) {
   unsigned cpu = 0;
-  auto rv = folly::FallbackGetcpu<SequentialThreadId<std::atomic>>::getcpu(
-      &cpu, nullptr, nullptr);
+  auto rv =
+      folly::FallbackGetcpu<SequentialThreadId>::getcpu(&cpu, nullptr, nullptr);
   EXPECT_EQ(rv, 0);
   EXPECT_TRUE(cpu > 0);
   unsigned again;
-  folly::FallbackGetcpu<SequentialThreadId<std::atomic>>::getcpu(
-      &again, nullptr, nullptr);
+  folly::FallbackGetcpu<SequentialThreadId>::getcpu(&again, nullptr, nullptr);
   EXPECT_EQ(cpu, again);
 }
-#endif
 
 TEST(ThreadId, SimplePthread) {
   unsigned cpu = 0;
@@ -1065,8 +1063,7 @@ TEST(ThreadId, SimplePthread) {
   EXPECT_EQ(cpu, again);
 }
 
-#ifdef FOLLY_CL_USE_FOLLY_TLS
-static FOLLY_TLS unsigned testingCpu = 0;
+static thread_local unsigned testingCpu = 0;
 
 static int testingGetcpu(unsigned* cpu, unsigned* node, void* /* unused */) {
   if (cpu != nullptr) {
@@ -1077,7 +1074,6 @@ static int testingGetcpu(unsigned* cpu, unsigned* node, void* /* unused */) {
   }
   return 0;
 }
-#endif
 
 TEST(AccessSpreader, Simple) {
   for (size_t s = 1; s < 200; ++s) {
@@ -1109,7 +1105,6 @@ TEST(AccessSpreader, ConcurrentAccessCached) {
   }
 }
 
-#ifdef FOLLY_CL_USE_FOLLY_TLS
 #define DECLARE_SPREADER_TAG(tag, locality, func)      \
   namespace {                                          \
   template <typename dummy>                            \
@@ -1174,5 +1169,3 @@ TEST(CoreRawAllocator, Basic) {
   }
   mems.clear();
 }
-
-#endif

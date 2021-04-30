@@ -24,7 +24,6 @@
 #include <folly/experimental/coro/CurrentExecutor.h>
 #include <folly/experimental/coro/Invoke.h>
 #include <folly/experimental/coro/Result.h>
-#include <folly/experimental/coro/Utils.h>
 #include <folly/experimental/coro/ViaIfAsync.h>
 #include <folly/experimental/coro/WithAsyncStack.h>
 #include <folly/experimental/coro/WithCancellation.h>
@@ -146,12 +145,12 @@ class AsyncGeneratorPromise {
     }
   }
 
-  AwaitableVariant<YieldAwaiter, AwaitableReady<void>> await_transform(
+  variant_awaitable<YieldAwaiter, ready_awaitable<>> await_transform(
       co_safe_point_t) noexcept {
     if (cancelToken_.isCancellationRequested()) {
       return yield_value(co_cancelled);
     }
-    return AwaitableReady<void>{};
+    return ready_awaitable<>{};
   }
 
   void unhandled_exception() noexcept {
@@ -174,11 +173,11 @@ class AsyncGeneratorPromise {
   }
 
   auto await_transform(folly::coro::co_current_executor_t) noexcept {
-    return AwaitableReady<folly::Executor*>{executor_.get()};
+    return ready_awaitable<folly::Executor*>{executor_.get()};
   }
 
   auto await_transform(folly::coro::co_current_cancellation_token_t) noexcept {
-    return AwaitableReady<const folly::CancellationToken&>{cancelToken_};
+    return ready_awaitable<const folly::CancellationToken&>{cancelToken_};
   }
 
   void setCancellationToken(folly::CancellationToken cancelToken) noexcept {
@@ -191,6 +190,7 @@ class AsyncGeneratorPromise {
   }
 
   void setExecutor(folly::Executor::KeepAlive<> executor) noexcept {
+    DCHECK(executor);
     executor_ = std::move(executor);
   }
 
@@ -572,8 +572,8 @@ class FOLLY_NODISCARD AsyncGenerator {
   }
 
   template <typename F, typename... A, typename F_, typename... A_>
-  friend AsyncGenerator folly_co_invoke(
-      tag_t<AsyncGenerator, F, A...>, F_ f, A_... a) {
+  friend AsyncGenerator tag_invoke(
+      tag_t<co_invoke_fn>, tag_t<AsyncGenerator, F, A...>, F_ f, A_... a) {
     auto r = invoke(static_cast<F&&>(f), static_cast<A&&>(a)...);
     while (auto v = co_await r.next()) {
       co_yield std::move(v).value();

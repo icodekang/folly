@@ -16,17 +16,17 @@
 
 #include <folly/experimental/io/SimpleAsyncIO.h>
 
+#include <bitset>
+
 #include <folly/File.h>
+#include <folly/Random.h>
 #include <folly/experimental/coro/BlockingWait.h>
 #include <folly/experimental/coro/Collect.h>
+#include <folly/io/IOBuf.h>
+#include <folly/portability/GTest.h>
 #include <folly/synchronization/Baton.h>
 
 #include <glog/logging.h>
-
-#include <folly/Random.h>
-#include <folly/io/IOBuf.h>
-#include <folly/portability/GTest.h>
-#include <bitset>
 
 using namespace folly;
 
@@ -209,7 +209,7 @@ TEST_P(SimpleAsyncIOTest, CoroutineReadWrite) {
 }
 #endif // FOLLY_HAS_COROUTINES
 
-INSTANTIATE_TEST_CASE_P(
+INSTANTIATE_TEST_SUITE_P(
     SimpleAsyncIOTests,
     SimpleAsyncIOTest,
     ::testing::Values(

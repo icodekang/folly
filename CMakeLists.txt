@@ -150,7 +150,6 @@ REMOVE_MATCHES_FROM_LISTS(files hfiles
   MATCHES
     "^${FOLLY_DIR}/build/"
     "^${FOLLY_DIR}/experimental/exception_tracer/"
-    "^${FOLLY_DIR}/futures/exercises/"
     "^${FOLLY_DIR}/logging/example/"
     "^${FOLLY_DIR}/(.*/)?test/"
     "^${FOLLY_DIR}/tools/"
@@ -164,7 +163,6 @@ list(REMOVE_ITEM files
   ${FOLLY_DIR}/python/executor.cpp
   ${FOLLY_DIR}/python/fibers.cpp
   ${FOLLY_DIR}/python/GILAwareManualExecutor.cpp
-  ${FOLLY_DIR}/cybld/folly/executor.cpp
   ${FOLLY_DIR}/experimental/symbolizer/Addr2Line.cpp
 )
 list(REMOVE_ITEM hfiles
@@ -315,7 +313,7 @@ set(PCLMUL_FILES
   ${FOLLY_DIR}/hash/detail/Crc32CombineDetail.cpp
   ${FOLLY_DIR}/hash/detail/Crc32cDetail.cpp
 )
-CHECK_CXX_COMPILER_FLAG(-mpclmul COMPILER_HAS_M_PCLMUL)
+check_cxx_compiler_flag(-mpclmul COMPILER_HAS_M_PCLMUL)
 if (COMPILER_HAS_M_PCLMUL)
   message(
     STATUS
@@ -786,6 +784,7 @@ if (BUILD_TESTS)
       TEST lang_cast_test SOURCES CastTest.cpp
       TEST lang_checked_math_test SOURCES CheckedMathTest.cpp
       TEST lang_exception_test SOURCES ExceptionTest.cpp
+      TEST lang_extern_test SOURCES ExternTest.cpp
       TEST lang_launder_test SOURCES LaunderTest.cpp
       TEST lang_ordering_test SOURCES OrderingTest.cpp
       TEST lang_pretty_test SOURCES PrettyTest.cpp
@@ -793,6 +792,7 @@ if (BUILD_TESTS)
       TEST lang_r_value_reference_wrapper_test
         SOURCES RValueReferenceWrapperTest.cpp
       TEST lang_safe_assert_test SOURCES SafeAssertTest.cpp
+      TEST lang_to_ascii_test SOURCES ToAsciiTest.cpp
       TEST lang_type_info_test SOURCES TypeInfoTest.cpp
       TEST lang_uncaught_exceptions_test SOURCES UncaughtExceptionsTest.cpp
 

@@ -16,10 +16,11 @@
 
 #pragma once
 
+#include <tuple>
+
 #include <folly/Conv.h>
 #include <folly/Optional.h>
 #include <folly/functional/Invoke.h>
-#include <tuple>
 
 namespace folly {
 
@@ -41,7 +42,8 @@ typename Map::mapped_type get_default(
     const Map& map, const Key& key, Value&& dflt) {
   using M = typename Map::mapped_type;
   auto pos = map.find(key);
-  return (pos != map.end()) ? (pos->second) : M(std::forward<Value>(dflt));
+  return (pos != map.end()) ? pos->second
+                            : static_cast<M>(static_cast<Value&&>(dflt));
 }
 
 /**

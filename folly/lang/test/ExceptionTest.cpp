@@ -25,26 +25,17 @@
 #include <folly/lang/Pretty.h>
 #include <folly/portability/GTest.h>
 
-namespace folly {
-namespace exception_test {
-
-template <typename... T>
-FOLLY_ATTR_WEAK FOLLY_NOINLINE void sink(T&&...) {}
-
-} // namespace exception_test
-} // namespace folly
-
 extern "C" FOLLY_KEEP void check_cond_std_terminate(bool c) {
   if (c) {
     std::terminate();
   }
-  folly::exception_test::sink();
+  folly::detail::keep_sink();
 }
 extern "C" FOLLY_KEEP void check_cond_folly_terminate_with(bool c) {
   if (c) {
     folly::terminate_with<std::runtime_error>("bad error");
   }
-  folly::exception_test::sink();
+  folly::detail::keep_sink();
 }
 
 template <typename Ex>
@@ -133,8 +124,12 @@ TEST_F(ExceptionTest, catch_exception) {
   auto thrower = [](int i) { return [=]() -> int { throw i; }; };
   EXPECT_EQ(3, folly::catch_exception(returner(3), returner(4)));
   EXPECT_EQ(3, folly::catch_exception<int>(returner(3), identity));
+  EXPECT_EQ(3, folly::catch_exception<int>(returner(3), +identity));
+  EXPECT_EQ(3, folly::catch_exception<int>(returner(3), *+identity));
   EXPECT_EQ(4, folly::catch_exception(thrower(3), returner(4)));
   EXPECT_EQ(3, folly::catch_exception<int>(thrower(3), identity));
+  EXPECT_EQ(3, folly::catch_exception<int>(thrower(3), +identity));
+  EXPECT_EQ(3, folly::catch_exception<int>(thrower(3), *+identity));
 }
 
 TEST_F(ExceptionTest, rethrow_current_exception) {

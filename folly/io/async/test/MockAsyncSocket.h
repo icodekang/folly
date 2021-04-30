@@ -26,25 +26,27 @@ namespace test {
 
 class MockAsyncSocket : public AsyncSocket {
  public:
-  typedef std::unique_ptr<MockAsyncSocket, ReleasableDestructor> UniquePtr;
+  typedef std::unique_ptr<MockAsyncSocket, Destructor> UniquePtr;
 
   explicit MockAsyncSocket(EventBase* base) : AsyncSocket(base) {}
 
-  MOCK_METHOD5(
+  MOCK_METHOD6(
       connect_,
       void(
           AsyncSocket::ConnectCallback*,
           const folly::SocketAddress&,
           int,
           const folly::SocketOptionMap&,
-          const folly::SocketAddress&));
+          const folly::SocketAddress&,
+          const std::string&));
   void connect(
       AsyncSocket::ConnectCallback* callback,
       const folly::SocketAddress& address,
       int timeout,
       const folly::SocketOptionMap& options,
-      const folly::SocketAddress& bindAddr) noexcept override {
-    connect_(callback, address, timeout, options, bindAddr);
+      const folly::SocketAddress& bindAddr,
+      const std::string& ifName) noexcept override {
+    connect_(callback, address, timeout, options, bindAddr, ifName);
   }
 
   MOCK_CONST_METHOD1(getPeerAddress, void(folly::SocketAddress*));

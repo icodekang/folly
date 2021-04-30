@@ -30,6 +30,7 @@
 #include <folly/MapUtil.h>
 #include <folly/Traits.h>
 #include <folly/lang/Exception.h>
+#include <folly/lang/ToAscii.h>
 #include <folly/portability/Windows.h>
 
 // Ignore -Wformat-nonliteral and -Wconversion warnings within this file
@@ -277,18 +278,6 @@ void BaseFormatter<Derived, containerMode, Args...>::operator()(
   }
 }
 
-template <class Derived, bool containerMode, class... Args>
-void writeTo(
-    FILE* fp, const BaseFormatter<Derived, containerMode, Args...>& formatter) {
-  auto writer = [fp](StringPiece sp) {
-    size_t n = fwrite(sp.data(), 1, sp.size(), fp);
-    if (n < sp.size()) {
-      throwSystemError("Formatter writeTo", "fwrite failed");
-    }
-  };
-  formatter(writer);
-}
-
 namespace format_value {
 
 template <class FormatCallback>
@@ -533,8 +522,9 @@ class FormatValue<
             "' specifier");
         valBufBegin = valBuf + 1; // room for sign
 
-        // Use uintToBuffer, faster than sprintf
-        valBufEnd = valBufBegin + uint64ToBufferUnsafe(uval, valBufBegin);
+        // Use to_ascii_decimal, faster than sprintf
+        valBufEnd = valBufBegin +
+            to_ascii_decimal(valBufBegin, valBuf + sizeof(valBuf), uval);
         if (arg.thousandsSeparator) {
           detail::insertThousandsGroupingUnsafe(valBufBegin, &valBufEnd);
         }

@@ -75,7 +75,7 @@ class AsyncSSLSocketConnector;
  */
 class AsyncSSLSocket : public AsyncSocket {
  public:
-  typedef std::unique_ptr<AsyncSSLSocket, ReleasableDestructor> UniquePtr;
+  typedef std::unique_ptr<AsyncSSLSocket, Destructor> UniquePtr;
   using X509_deleter = folly::static_function_deleter<X509, &X509_free>;
 
   class HandshakeCB {
@@ -252,13 +252,17 @@ class AsyncSSLSocket : public AsyncSocket {
    * @param server Is socket in server mode?
    * @param deferSecurityNegotiation
    *          unencrypted data can be sent before sslConn/Accept
+   * @param peerAddress optional peer address (eg: returned from accept).  If
+   *          nullptr, AsyncSocket will lazily attempt to determine it from fd
+   *          via a system call
    */
   AsyncSSLSocket(
       std::shared_ptr<folly::SSLContext> ctx,
       EventBase* evb,
       NetworkSocket fd,
       bool server = true,
-      bool deferSecurityNegotiation = false);
+      bool deferSecurityNegotiation = false,
+      const SocketAddress* peerAddress = nullptr);
 
   /**
    * Create a server/client AsyncSSLSocket from an already connected
@@ -283,25 +287,26 @@ class AsyncSSLSocket : public AsyncSocket {
   /**
    * Helper function to create a server/client shared_ptr<AsyncSSLSocket>.
    */
-  static std::shared_ptr<AsyncSSLSocket> newSocket(
+  static UniquePtr newSocket(
       const std::shared_ptr<folly::SSLContext>& ctx,
       EventBase* evb,
       NetworkSocket fd,
       bool server = true,
-      bool deferSecurityNegotiation = false) {
-    return std::shared_ptr<AsyncSSLSocket>(AsyncSSLSocket::UniquePtr(
-        new AsyncSSLSocket(ctx, evb, fd, server, deferSecurityNegotiation)));
+      bool deferSecurityNegotiation = false,
+      const folly::SocketAddress* peerAddress = nullptr) {
+    return AsyncSSLSocket::UniquePtr(new AsyncSSLSocket(
+        ctx, evb, fd, server, deferSecurityNegotiation, peerAddress));
   }
 
   /**
    * Helper function to create a client shared_ptr<AsyncSSLSocket>.
    */
-  static std::shared_ptr<AsyncSSLSocket> newSocket(
+  static UniquePtr newSocket(
       const std::shared_ptr<folly::SSLContext>& ctx,
       EventBase* evb,
       bool deferSecurityNegotiation = false) {
-    return std::shared_ptr<AsyncSSLSocket>(AsyncSSLSocket::UniquePtr(
-        new AsyncSSLSocket(ctx, evb, deferSecurityNegotiation)));
+    return AsyncSSLSocket::UniquePtr(
+        new AsyncSSLSocket(ctx, evb, deferSecurityNegotiation));
   }
 
 #if FOLLY_OPENSSL_HAS_SNI
@@ -329,21 +334,27 @@ class AsyncSSLSocket : public AsyncSocket {
    * @param evb  EventBase that will manage this socket.
    * @param fd   File descriptor to take over (should be a connected socket).
    * @param serverName tlsext_hostname that will be sent in ClientHello.
+   * @param deferSecurityNegotiation
+   *          unencrypted data can be sent before sslConn/Accept
+   * @param peerAddress optional peer address (eg: returned from accept).  If
+   *          nullptr, AsyncSocket will lazily attempt to determine it from fd
+   *          via a system call
    */
   AsyncSSLSocket(
       const std::shared_ptr<folly::SSLContext>& ctx,
       EventBase* evb,
       NetworkSocket fd,
       const std::string& serverName,
-      bool deferSecurityNegotiation = false);
+      bool deferSecurityNegotiation = false,
+      const SocketAddress* peerAddr = nullptr);
 
-  static std::shared_ptr<AsyncSSLSocket> newSocket(
+  static UniquePtr newSocket(
       const std::shared_ptr<folly::SSLContext>& ctx,
       EventBase* evb,
       const std::string& serverName,
       bool deferSecurityNegotiation = false) {
-    return std::shared_ptr<AsyncSSLSocket>(AsyncSSLSocket::UniquePtr(
-        new AsyncSSLSocket(ctx, evb, serverName, deferSecurityNegotiation)));
+    return AsyncSSLSocket::UniquePtr(
+        new AsyncSSLSocket(ctx, evb, serverName, deferSecurityNegotiation));
   }
 #endif // FOLLY_OPENSSL_HAS_SNI
 
@@ -382,6 +393,18 @@ class AsyncSSLSocket : public AsyncSocket {
   void setEorTracking(bool track) override;
   size_t getRawBytesWritten() const override;
   size_t getRawBytesReceived() const override;
+
+  // End of methods inherited from AsyncTransport
+
+  /**
+   * Enable ByteEvents for this socket.
+   *
+   * ByteEvents cannot be enabled if TLS 1.0 or earlier is in use, as these
+   * client implementations often have trouble handling cases where a TLS
+   * record is split across multiple packets.
+   */
+  void enableByteEvents() override;
+
   void enableClientHelloParsing();
 
   /**
@@ -420,7 +443,8 @@ class AsyncSSLSocket : public AsyncSocket {
       const folly::SocketAddress& address,
       int timeout = 0,
       const SocketOptionMap& options = emptySocketOptionMap,
-      const folly::SocketAddress& bindAddr = anyAddress()) noexcept override;
+      const folly::SocketAddress& bindAddr = anyAddress(),
+      const std::string& ifName = "") noexcept override;
 
   /**
    * A variant of connect that allows the caller to specify
@@ -443,7 +467,8 @@ class AsyncSSLSocket : public AsyncSocket {
       std::chrono::milliseconds connectTimeout,
       std::chrono::milliseconds totalConnectTimeout,
       const SocketOptionMap& options = emptySocketOptionMap,
-      const folly::SocketAddress& bindAddr = anyAddress()) noexcept;
+      const folly::SocketAddress& bindAddr = anyAddress(),
+      const std::string& ifName = "") noexcept;
 
   using AsyncSocket::connect;
 
@@ -820,8 +845,14 @@ class AsyncSSLSocket : public AsyncSocket {
     asyncOperationFinishCallback_ = std::move(cb);
   }
 
+  // Only enable if security negotiation is deferred
   // zero copy is not supported by openssl.
-  bool setZeroCopy(bool /*enable*/) override { return false; }
+  bool setZeroCopy(bool enable) override {
+    if (sslState_ == STATE_UNENCRYPTED) {
+      return AsyncSocket::setZeroCopy(enable);
+    }
+    return false;
+  }
 
  private:
   /**

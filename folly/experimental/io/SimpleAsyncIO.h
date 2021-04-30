@@ -16,13 +16,14 @@
 
 #pragma once
 
+#include <queue>
+
 #include <folly/Synchronized.h>
 #include <folly/executors/GlobalExecutor.h>
 #include <folly/experimental/coro/Task.h>
 #include <folly/experimental/io/AsyncBase.h>
 #include <folly/io/async/EventHandler.h>
 #include <folly/io/async/ScopedEventBaseThread.h>
-#include <queue>
 
 namespace folly {
 
@@ -73,7 +74,8 @@ class SimpleAsyncIO : public EventHandler {
   struct Config {
     Config()
         : maxRequests_(1000),
-          completionExecutor_(getKeepAliveToken(getCPUExecutor().get())),
+          completionExecutor_(
+              getKeepAliveToken(getUnsafeMutableGlobalCPUExecutor().get())),
           mode_(AIO),
           evb_(nullptr) {}
     Config& setMaxRequests(size_t maxRequests) {

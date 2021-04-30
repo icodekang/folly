@@ -33,6 +33,7 @@
 #include <folly/io/async/AsyncTransport.h>
 #include <folly/io/async/DelayedDestruction.h>
 #include <folly/io/async/EventHandler.h>
+#include <folly/net/NetOpsDispatcher.h>
 #include <folly/portability/Sockets.h>
 #include <folly/small_vector.h>
 
@@ -76,31 +77,7 @@ namespace folly {
 
 class AsyncSocket : public AsyncTransport {
  public:
-  /**
-   * Use ReleasableDestructor with AsyncSocket to enable transferring the
-   * ownership of the socket owned by smart pointers.
-   */
-  class ReleasableDestructor : public DelayedDestruction::Destructor {
-   public:
-    void operator()(DelayedDestruction* dd) const {
-      if (!released_) {
-        dd->destroy();
-      }
-    }
-
-    /**
-     * Release the object managed by smart pointers. This is used when the
-     * object ownership is transferred to another smart pointer or manually
-     * managed by the caller. The original object must be properly deleted at
-     * the end of its life cycle to avoid resource leaks.
-     */
-    void release() { released_ = true; }
-
-   private:
-    bool released_{false};
-  };
-
-  using UniquePtr = std::unique_ptr<AsyncSocket, ReleasableDestructor>;
+  using UniquePtr = std::unique_ptr<AsyncSocket, Destructor>;
 
   class ConnectCallback {
    public:
@@ -214,30 +191,41 @@ class AsyncSocket : public AsyncTransport {
     }
 
     /**
-     * getAncillaryData() will be invoked to initialize ancillary data
-     * buffer referred by "msg_control" field of msghdr structure passed to
-     * ::sendmsg() system call based on the flags set in the passed
-     * folly::WriteFlags enum. Some flags in folly::WriteFlags are not relevant
-     * during this process. The function assumes that the size of buffer
-     * is not smaller than the value returned by getAncillaryDataSize() method
-     * for the same combination of flags.
+     * getAncillaryData() will be invoked to initialize ancillary data buffer
+     * referred by "msg_control" field of msghdr structure passed to ::sendmsg()
+     * system call based on the flags set in the passed folly::WriteFlags enum.
+     *
+     * Some flags in folly::WriteFlags are not relevant during this process;
+     * the default implementation only handles timestamping flags.
+     *
+     * The function requires that the size of buffer passed is equal to the
+     * value returned by getAncillaryDataSize() method for the same combination
+     * of flags.
      *
      * @param flags     Write flags requested for the given write operation
      * @param data      Pointer to ancillary data buffer to initialize.
+     * @param byteEventsEnabled      If byte events are enabled for this socket.
+     *                               When enabled, flags relevant to socket
+     *                               timestamps (e.g., TIMESTAMP_TX) should be
+     *                               included in ancillary (msg_control) data.
      */
     virtual void getAncillaryData(
-        folly::WriteFlags /*flags*/, void* /*data*/) noexcept {}
+        folly::WriteFlags flags,
+        void* data,
+        const bool byteEventsEnabled = false) noexcept;
 
     /**
      * getAncillaryDataSize() will be invoked to retrieve the size of
      * ancillary data buffer which should be passed to ::sendmsg() system call
      *
      * @param flags     Write flags requested for the given write operation
+     * @param byteEventsEnabled      If byte events are enabled for this socket.
+     *                               When enabled, flags relevant to socket
+     *                               timestamps (e.g., TIMESTAMP_TX) should be
+     *                               included in ancillary (msg_control) data.
      */
     virtual uint32_t getAncillaryDataSize(
-        folly::WriteFlags /*flags*/) noexcept {
-      return 0;
-    }
+        folly::WriteFlags flags, const bool byteEventsEnabled = false) noexcept;
 
     static const size_t maxAncillaryDataSize{0x5000};
 
@@ -266,6 +254,72 @@ class AsyncSocket : public AsyncTransport {
      * @param flags     Write flags requested for the given write operation
      */
     int getDefaultFlags(folly::WriteFlags flags, bool zeroCopyEnabled) noexcept;
+  };
+
+  /**
+   * Container with state and processing logic for ByteEvents.
+   */
+  struct ByteEventHelper {
+    bool byteEventsEnabled{false};
+    size_t rawBytesWrittenWhenByteEventsEnabled{0};
+    folly::Optional<AsyncSocketException> maybeEx;
+
+    /**
+     * Process a Cmsg and return a ByteEvent if available.
+     *
+     * The kernel will pass two cmsg for each timestamp:
+     *   1. ScmTimestamping: Software / Hardware Timestamps.
+     *   2. SockExtendedErrTimestamping: Byte offset associated with timestamp.
+     *
+     * These messages will be passed back-to-back; processCmsg() can handle them
+     * in any order (1 then 2, or 2 then 1), as long the order is consistent
+     * across timestamps.
+     *
+     * processCmsg() gracefully ignores Cmsg unrelated to socket timestamps, but
+     * will throw if it receives a sequence of Cmsg that are not compliant with
+     * its expectations.
+     *
+     * @return If the helper has received all components required to generate a
+     *         ByteEvent (e.g., ScmTimestamping and SockExtendedErrTimestamping
+     *         messages), it returns a ByteEvent and clears its local state.
+     *         Otherwise, returns an empty optional.
+     *
+     *         If the helper has previously thrown a ByteEventHelper::Exception,
+     *         it will not process further Cmsg and will continiously return an
+     *         empty optional.
+     *
+     * @throw  If the helper receives a sequence of Cmsg that violate its
+     *         expectations (e.g., multiple ScmTimestamping messages in a row
+     *         without corresponding SockExtendedErrTimestamping messages), it
+     *         throws a ByteEventHelper::Exception. Subsequent calls will return
+     *         an empty optional.
+     */
+    folly::Optional<ByteEvent> processCmsg(
+        const cmsghdr& cmsg, const size_t rawBytesWritten);
+
+    /**
+     * Exception class thrown by processCmsg.
+     *
+     * ByteEventHelper does not know the socket address and thus cannot
+     * construct a AsyncSocketException. Instead, ByteEventHelper throws a
+     * custom Exception and AsyncSocket rewraps it as an AsyncSocketException.
+     */
+    class Exception : public std::runtime_error {
+      using std::runtime_error::runtime_error;
+    };
+
+   private:
+    // state, reinitialized each time a complete timestamp is processed
+    struct TimestampState {
+      bool serrReceived{false};
+      uint32_t typeRaw{0};
+      uint32_t byteOffsetKernel{0};
+
+      bool scmTsReceived{false};
+      folly::Optional<std::chrono::nanoseconds> maybeSoftwareTs;
+      folly::Optional<std::chrono::nanoseconds> maybeHardwareTs;
+    };
+    folly::Optional<TimestampState> maybeTsState_;
   };
 
   explicit AsyncSocket();
@@ -322,8 +376,15 @@ class AsyncSocket : public AsyncTransport {
    * @param evb EventBase that will manage this socket.
    * @param fd  File descriptor to take over (should be a connected socket).
    * @param zeroCopyBufId Zerocopy buf id to start with.
+   * @param peerAddress optional peer address (eg: returned from accept).  If
+   *        nullptr, AsyncSocket will lazily attempt to determine it from fd
+   *        via a system call
    */
-  AsyncSocket(EventBase* evb, NetworkSocket fd, uint32_t zeroCopyBufId = 0);
+  AsyncSocket(
+      EventBase* evb,
+      NetworkSocket fd,
+      uint32_t zeroCopyBufId = 0,
+      const SocketAddress* peerAddress = nullptr);
 
   /**
    * Create an AsyncSocket from a different, already connected AsyncSocket.
@@ -380,8 +441,11 @@ class AsyncSocket : public AsyncTransport {
   /**
    * Helper function to create an AsyncSocket.
    */
-  static UniquePtr newSocket(EventBase* evb, NetworkSocket fd) {
-    return UniquePtr{new AsyncSocket(evb, fd)};
+  static UniquePtr newSocket(
+      EventBase* evb,
+      NetworkSocket fd,
+      const SocketAddress* peerAddress = nullptr) {
+    return UniquePtr{new AsyncSocket(evb, fd, 0, peerAddress)};
   }
 
   /**
@@ -437,7 +501,8 @@ class AsyncSocket : public AsyncTransport {
       const folly::SocketAddress& address,
       int timeout = 0,
       const SocketOptionMap& options = emptySocketOptionMap,
-      const folly::SocketAddress& bindAddr = anyAddress()) noexcept;
+      const folly::SocketAddress& bindAddr = anyAddress(),
+      const std::string& ifName = "") noexcept;
 
   void connect(
       ConnectCallback* callback,
@@ -551,6 +616,28 @@ class AsyncSocket : public AsyncTransport {
    */
   virtual SendMsgParamsCallback* getSendMsgParamsCB() const;
 
+  /**
+   * Override netops::Dispatcher to be used for netops:: calls.
+   *
+   * Pass empty shared_ptr to reset to default.
+   * Override can be used by unit tests to intercept and mock netops:: calls.
+   */
+  virtual void setOverrideNetOpsDispatcher(
+      std::shared_ptr<netops::Dispatcher> dispatcher) {
+    netops_.setOverride(std::move(dispatcher));
+  }
+
+  /**
+   * Returns override netops::Dispatcher being used for netops:: calls.
+   *
+   * Returns empty shared_ptr if no override set.
+   * Override can be used by unit tests to intercept and mock netops:: calls.
+   */
+  virtual std::shared_ptr<netops::Dispatcher> getOverrideNetOpsDispatcher()
+      const {
+    return netops_.getOverride();
+  }
+
   // Read and write methods
   void setReadCB(ReadCallback* callback) override;
   ReadCallback* getReadCallback() const override;
@@ -634,7 +721,7 @@ class AsyncSocket : public AsyncTransport {
 
   size_t getAppBytesWritten() const override { return appBytesWritten_; }
 
-  size_t getRawBytesWritten() const override { return getAppBytesWritten(); }
+  size_t getRawBytesWritten() const override { return rawBytesWritten_; }
 
   size_t getAppBytesReceived() const override { return appBytesReceived_; }
 
@@ -644,6 +731,8 @@ class AsyncSocket : public AsyncTransport {
     return totalAppBytesScheduledForWrite_ - appBytesWritten_;
   }
   size_t getRawBytesBuffered() const override { return getAppBytesBuffered(); }
+
+  // End of methods inherited from AsyncTransport
 
   std::chrono::nanoseconds getConnectTime() const {
     return connectEndTime_ - connectStartTime_;
@@ -777,7 +866,7 @@ class AsyncSocket : public AsyncTransport {
    */
   template <typename T>
   int getSockOpt(int level, int optname, T* optval, socklen_t* optlen) {
-    return netops::getsockopt(fd_, level, optname, (void*)optval, optlen);
+    return netops_->getsockopt(fd_, level, optname, (void*)optval, optlen);
   }
 
   /**
@@ -790,7 +879,7 @@ class AsyncSocket : public AsyncTransport {
    */
   template <typename T>
   int setSockOpt(int level, int optname, const T* optval) {
-    return netops::setsockopt(fd_, level, optname, optval, sizeof(T));
+    return netops_->setsockopt(fd_, level, optname, optval, sizeof(T));
   }
 
   /**
@@ -806,7 +895,7 @@ class AsyncSocket : public AsyncTransport {
    */
   virtual int getSockOptVirtual(
       int level, int optname, void* optval, socklen_t* optlen) {
-    return netops::getsockopt(fd_, level, optname, optval, optlen);
+    return netops_->getsockopt(fd_, level, optname, optval, optlen);
   }
 
   /**
@@ -822,7 +911,7 @@ class AsyncSocket : public AsyncTransport {
    */
   virtual int setSockOptVirtual(
       int level, int optname, void const* optval, socklen_t optlen) {
-    return netops::setsockopt(fd_, level, optname, optval, optlen);
+    return netops_->setsockopt(fd_, level, optname, optval, optlen);
   }
 
   /**
@@ -1003,7 +1092,7 @@ class AsyncSocket : public AsyncTransport {
     uint32_t totalBytesWritten_{0}; ///< total bytes written
   };
 
-  class LifecycleObserver : public AsyncTransport::LifecycleObserver {
+  class LifecycleObserver : virtual public AsyncTransport::LifecycleObserver {
    public:
     using AsyncTransport::LifecycleObserver::LifecycleObserver;
 
@@ -1202,6 +1291,7 @@ class AsyncSocket : public AsyncTransport {
   virtual void checkForImmediateRead() noexcept;
   virtual void handleInitialReadWrite() noexcept;
   virtual void prepareReadBuffer(void** buf, size_t* buflen);
+  virtual size_t prepareReadBuffers(struct iovec* iovs, size_t num);
   virtual size_t handleErrMessages() noexcept;
   virtual void handleRead() noexcept;
   virtual void handleWrite() noexcept;
@@ -1209,7 +1299,7 @@ class AsyncSocket : public AsyncTransport {
   void timeoutExpired() noexcept;
 
   /**
-   * Attempt to read from the socket.
+   * Attempt to read from the socket into a single buffer
    *
    * @param buf      The buffer to read data into.
    * @param buflen   The length of the buffer.
@@ -1217,6 +1307,16 @@ class AsyncSocket : public AsyncTransport {
    * @return Returns a read result. See read result for details.
    */
   virtual ReadResult performRead(void** buf, size_t* buflen, size_t* offset);
+
+  /**
+   * Attempt to read from the socket into an iovec array
+   *
+   * @param iovs     The iovec array to read data into.
+   * @param num      The number of elements in the iovec array
+   *
+   * @return Returns a read result. See read result for details.
+   */
+  virtual ReadResult performReadv(struct iovec* iovs, size_t num);
 
   /**
    * Populate an iovec array from an IOBuf and attempt to write it.
@@ -1283,6 +1383,16 @@ class AsyncSocket : public AsyncTransport {
       uint32_t* partialWritten);
 
   /**
+   * Prepares a msghdr and sends the message over the socket using sendmsg
+   *
+   * @param vec             The iovec array pointing to the buffers to write.
+   * @param count           The length of the iovec array.
+   * @param flags           Set of write flags.
+   */
+  virtual AsyncSocket::WriteResult sendSocketMessage(
+      const iovec* vec, size_t count, WriteFlags flags);
+
+  /**
    * Sends the message over the socket using sendmsg
    *
    * @param msg       Message to send
@@ -1314,6 +1424,9 @@ class AsyncSocket : public AsyncTransport {
    */
   bool updateEventRegistration(uint16_t enable, uint16_t disable);
 
+  // read methods
+  ReadResult performReadInternal(struct iovec* iovs, size_t num);
+
   // Actually close the file descriptor and set it to -1 so we don't
   // accidentally close it again.
   void doClose();
@@ -1334,6 +1447,7 @@ class AsyncSocket : public AsyncTransport {
       const AsyncSocketException& ex);
   void failWrite(const char* fn, const AsyncSocketException& ex);
   void failAllWrites(const AsyncSocketException& ex);
+  void failByteEvents(const AsyncSocketException& ex);
   virtual void invokeConnectErr(const AsyncSocketException& ex);
   virtual void invokeConnectSuccess();
   void invalidState(ConnectCallback* callback);
@@ -1363,6 +1477,27 @@ class AsyncSocket : public AsyncTransport {
       std::unique_ptr<folly::IOBuf>&& buf, ReleaseIOBufCallback* cb);
   bool containsZeroCopyBuf(folly::IOBuf* ptr);
   void releaseZeroCopyBuf(uint32_t id);
+
+  /**
+   * Attempt to enable Observer ByteEvents for this socket.
+   *
+   * Once enabled, ByteEvents rename enabled for the socket's life.
+   *
+   * ByteEvents are delivered to Observers; when an observer is added:
+   *    - If this function has already been called, byteEventsEnabled() or
+   *      byteEventsUnavailable() will be called, depending on ByteEvent state.
+   *    - Else if the socket is connected, this function is called immediately.
+   *    - Else if the socket has not yet connected, this function will be called
+   *      after the socket has connected (ByteEvents cannot be set up earlier).
+   *
+   * If ByteEvents are successfully enabled, byteEventsEnabled() will be called
+   * on each Observer that has requested ByteEvents. If unable to enable, or if
+   * ByteEvents become unavailable (e.g., due to close), byteEventsUnavailable()
+   * will be called on each Observer that has requested ByteEvents.
+   *
+   * This function does need to be explicitly called under other circumstances.
+   */
+  virtual void enableByteEvents();
 
   AsyncWriter::ZeroCopyEnableFunc zeroCopyEnableFunc_;
 
@@ -1410,6 +1545,7 @@ class AsyncSocket : public AsyncTransport {
   std::weak_ptr<ShutdownSocketSet> wShutdownSocketSet_;
   size_t appBytesReceived_; ///< Num of bytes received from socket
   size_t appBytesWritten_; ///< Num of bytes written to socket
+  size_t rawBytesWritten_; ///< Num of (raw) bytes written to socket
   // The total num of bytes passed to AsyncSocket's write functions. It doesn't
   // include failed writes, but it does include buffered writes.
   size_t totalAppBytesScheduledForWrite_;
@@ -1443,6 +1579,10 @@ class AsyncSocket : public AsyncTransport {
   bool noTSocks_{false};
   // Whether to track EOR or not.
   bool trackEor_{false};
+
+  // ByteEvent state
+  std::unique_ptr<ByteEventHelper> byteEventHelper_;
+
   bool zeroCopyEnabled_{false};
   bool zeroCopyVal_{false};
   // zerocopy re-enable logic
@@ -1456,6 +1596,8 @@ class AsyncSocket : public AsyncTransport {
       nullptr};
 
   bool closeOnFailedWrite_{true};
+
+  netops::DispatcherContainer netops_;
 };
 
 } // namespace folly

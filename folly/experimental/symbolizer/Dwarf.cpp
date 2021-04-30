@@ -22,7 +22,7 @@
 #include <folly/Optional.h>
 #include <folly/portability/Config.h>
 
-#if FOLLY_HAVE_DWARF
+#if FOLLY_HAVE_DWARF && FOLLY_HAVE_ELF
 
 #include <dwarf.h>
 
@@ -1317,9 +1317,11 @@ Dwarf::LineNumberVM::StepResult Dwarf::LineNumberVM::step(
       // use unbounded amounts of state (ie. use the heap).  We'll do a second
       // pass (using nextDefineFile()) if necessary.
       break;
+#if !defined(__FreeBSD__)
     case DW_LNE_set_discriminator:
       discriminator_ = readULEB(program);
       return CONTINUE;
+#endif
   }
 
   // Unrecognized extended opcode

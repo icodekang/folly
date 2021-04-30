@@ -52,7 +52,7 @@ using SynchronizedTestTypes = testing::Types<
     folly::RWTicketSpinLock64,
 #endif
     folly::SpinLock>;
-TYPED_TEST_CASE(SynchronizedTest, SynchronizedTestTypes);
+TYPED_TEST_SUITE(SynchronizedTest, SynchronizedTestTypes);
 
 TYPED_TEST(SynchronizedTest, Basic) {
   testBasic<TypeParam>();
@@ -116,7 +116,7 @@ using SynchronizedTimedTestTypes = testing::Types<
 #endif
     folly::SharedMutexReadPriority,
     folly::SharedMutexWritePriority>;
-TYPED_TEST_CASE(SynchronizedTimedTest, SynchronizedTimedTestTypes);
+TYPED_TEST_SUITE(SynchronizedTimedTest, SynchronizedTimedTestTypes);
 
 TYPED_TEST(SynchronizedTimedTest, Timed) {
   testTimed<TypeParam>();
@@ -132,7 +132,7 @@ using SynchronizedTimedWithConstTestTypes = testing::Types<
 #endif
     folly::SharedMutexReadPriority,
     folly::SharedMutexWritePriority>;
-TYPED_TEST_CASE(
+TYPED_TEST_SUITE(
     SynchronizedTimedWithConstTest, SynchronizedTimedWithConstTestTypes);
 
 TYPED_TEST(SynchronizedTimedWithConstTest, TimedShared) {
@@ -160,11 +160,11 @@ class FakeMutex {
   // Keep these two static for test access
   // Keep them thread_local in case of tests are run in parallel within one
   // process
-  static FOLLY_TLS int lockCount_;
-  static FOLLY_TLS int unlockCount_;
+  static thread_local int lockCount_;
+  static thread_local int unlockCount_;
 };
-FOLLY_TLS int FakeMutex::lockCount_{0};
-FOLLY_TLS int FakeMutex::unlockCount_{0};
+thread_local int FakeMutex::lockCount_{0};
+thread_local int FakeMutex::unlockCount_{0};
 
 // SynchronizedLockTest is used to verify the correct lock unlock behavior
 // happens per design

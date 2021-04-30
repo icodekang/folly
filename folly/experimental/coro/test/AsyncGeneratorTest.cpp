@@ -16,8 +16,6 @@
 
 #include <folly/Portability.h>
 
-#if FOLLY_HAS_COROUTINES
-
 #include <folly/ScopeGuard.h>
 #include <folly/Traits.h>
 #include <folly/experimental/coro/AsyncGenerator.h>
@@ -36,6 +34,8 @@
 #include <map>
 #include <string>
 #include <tuple>
+
+#if FOLLY_HAS_COROUTINES
 
 class AsyncGeneratorTest : public testing::Test {};
 
@@ -499,7 +499,7 @@ TEST(AsyncGenerator, YieldCoError) {
     try {
       (void)co_await gen.next();
       CHECK(false);
-    } catch (SomeError) {
+    } catch (const SomeError&) {
     }
   }());
 }

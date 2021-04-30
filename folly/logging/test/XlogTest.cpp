@@ -16,6 +16,9 @@
 
 #include <folly/logging/xlog.h>
 
+#include <chrono>
+#include <thread>
+
 #include <folly/logging/LogConfigParser.h>
 #include <folly/logging/LogHandler.h>
 #include <folly/logging/LogMessage.h>
@@ -27,8 +30,6 @@
 #include <folly/portability/GMock.h>
 #include <folly/portability/GTest.h>
 #include <folly/test/TestUtils.h>
-#include <chrono>
-#include <thread>
 
 using namespace folly;
 using std::make_shared;
@@ -366,6 +367,8 @@ TEST_F(XlogTest, rateLimiting) {
     // coarser than milliseconds
     XLOG_EVERY_MS(DBG1, 100ms, "ms arg ", n);
     XLOG_EVERY_MS(DBG1, 1s, "s arg ", n);
+    auto t = 1s;
+    XLOG_EVERY_MS(DBG1, t, "s arg capture ", n);
 
     // Use XLOGF_EVERY_MS
     XLOGF_EVERY_MS(DBG1, 100, "fmt arg {}", n);
@@ -384,24 +387,11 @@ TEST_F(XlogTest, rateLimiting) {
   EXPECT_THAT(
       handler->getMessageValues(),
       ElementsAreArray({
-          "int arg 0",
-          "ms arg 0",
-          "s arg 0",
-          "fmt arg 0",
-          "fmt ms arg 0",
-          "2x int arg 0",
-          "1x ms arg 0",
-          "3x s arg 0",
-          "2x int arg 1",
-          "3x s arg 1",
-          "3x s arg 2",
-          "int arg 6",
-          "ms arg 6",
-          "fmt arg 6",
-          "fmt ms arg 6",
-          "2x int arg 6",
-          "1x ms arg 6",
-          "2x int arg 7",
+          "int arg 0",    "ms arg 0",     "s arg 0",      "s arg capture 0",
+          "fmt arg 0",    "fmt ms arg 0", "2x int arg 0", "1x ms arg 0",
+          "3x s arg 0",   "2x int arg 1", "3x s arg 1",   "3x s arg 2",
+          "int arg 6",    "ms arg 6",     "fmt arg 6",    "fmt ms arg 6",
+          "2x int arg 6", "1x ms arg 6",  "2x int arg 7",
       }));
   handler->clearMessages();
 

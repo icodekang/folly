@@ -219,6 +219,7 @@ class FiberManager : public ::folly::Executor {
    * @return true if there are outstanding tasks.
    */
   bool hasTasks() const;
+  bool isRemoteScheduled() const;
 
   /**
    * @return The number of currently active fibers (ready to run or blocked).
@@ -584,8 +585,8 @@ class FiberManager : public ::folly::Executor {
 
    private:
     FiberManager& fiberManager_;
-    void timeoutExpired() noexcept { run(); }
-    void callbackCanceled() noexcept {}
+    void timeoutExpired() noexcept override { run(); }
+    void callbackCanceled() noexcept override {}
   };
 
   FibersPoolResizer fibersPoolResizer_;
